@@ -1,3 +1,5 @@
+> This project is in progress and not yet in a working state!
+
 # watch-rust (watchr)
 
 A command-line tool similar to Linux's `watch`, written in Rust!
