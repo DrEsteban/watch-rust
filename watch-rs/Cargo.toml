@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "A Rust implementation of Linux's `watch`"
 edition = "2021"
 authors = ["DrEsteban"]
+license-file = "../LICENSE"
 
 [dependencies]
 clap = { version = "4.5.4", features = ["derive", "cargo"] }
