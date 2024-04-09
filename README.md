@@ -1,6 +1,6 @@
-# watch-rust (watchr)
+# watch-rust (watch-rs)
 
-A (silly) command-line tool similar to Linux's `watch`, written in Rust!
+A ~silly~ command-line tool similar to Linux's `watch`, written in Rust!
 
 ## Motivation
 
