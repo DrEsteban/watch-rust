@@ -1,6 +1,6 @@
 [package]
 name = "watch-rs"
-version = "0.1.3"
+version = "0.1.4"
 description = "A Rust implementation of Linux's `watch`"
 edition = "2021"
 authors = ["DrEsteban"]
