@@ -1,0 +1,10 @@
+[package]
+name = "watch-rs"
+version = "0.1.0"
+description = "A Rust implementation of Linux's `watch`"
+edition = "2021"
+authors = ["DrEsteban"]
+
+[dependencies]
+clap = { version = "4.5.4", features = ["derive", "cargo"] }
+crossterm = "0.27.0"

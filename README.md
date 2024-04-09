@@ -1,8 +1,6 @@
-> This project is in progress and not yet in a working state!
-
 # watch-rust (watchr)
 
-A command-line tool similar to Linux's `watch`, written in Rust!
+A (silly) command-line tool similar to Linux's `watch`, written in Rust!
 
 ## Motivation
 
@@ -12,13 +10,3 @@ I've always been frustrated there's no real equivalent for `watch` on Windows, (
 
 ## Installation
 // TODO
-
-### Cargo
-```shell
-
-```
-
-### Manual
-```shell
-
-```
