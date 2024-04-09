@@ -9,4 +9,8 @@ I wanted to get an introduction to Rust, so I decided to write a simple tool tha
 I've always been frustrated there's no real equivalent for `watch` on Windows, (that I could find), so this project closes that gap and allows me to learn Rust at the same time.
 
 ## Installation
-// TODO
+
+### Cargo
+```shell
+cargo install watch-rs
+```
