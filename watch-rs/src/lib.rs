@@ -28,7 +28,7 @@ use crossterm::{
 /// # Examples
 ///
 /// ```
-/// use watch_rust::watch;
+/// use watch_rs::watch;
 ///
 /// fn main() {
 ///     if let Err(err) = watch("ls".to_string(), vec!["-l".to_string()], 1) {
