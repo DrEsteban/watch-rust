@@ -1,13 +1,22 @@
 [package]
 name = "watch-rs"
-version = "0.1.4"
+version = "0.1.5"
 description = "A Rust implementation of Linux's `watch`"
 edition = "2021"
 authors = ["DrEsteban"]
 license-file = "LICENSE"
 readme = "README.md"
 repository = "https://github.com/DrEsteban/watch-rust"
+categories = ["command-line-utilities"]
+exclude = [
+    ".github",
+    ".vscode"
+]
 
 [dependencies]
 clap = { version = "4.5.4", features = ["derive", "cargo"] }
 crossterm = "0.27.0"
+
+[[bin]]
+name = "watchr"
+path = "src/main.rs"

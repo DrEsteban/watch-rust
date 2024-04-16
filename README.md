@@ -13,4 +13,5 @@ I've always been frustrated there's no real equivalent for `watch` on Windows, (
 ### Cargo
 ```shell
 cargo install watch-rs
+watchr --help
 ```
