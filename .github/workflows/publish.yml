@@ -19,6 +19,7 @@ jobs:
       run: |
         cargo build --verbose
         cargo test --verbose
+    # TODO: cargo install cargo-incversion
     - name: Publish
       run: |
         cargo login ${{ secrets.CRATES_IO_TOKEN }}
