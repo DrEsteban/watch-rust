@@ -1,16 +1,15 @@
-name: Rust
+name: Publish package
 
 on:
   push:
     branches: [ "master" ]
-  pull_request:
-    branches: [ "master" ]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  publish:
 
     runs-on: ubuntu-latest
 
@@ -20,3 +19,7 @@ jobs:
       run: |
         cargo build --verbose
         cargo test --verbose
+    - name: Publish
+      run: |
+        cargo login ${{ secrets.CRATES_IO_TOKEN }}
+        cargo publish --verbose
