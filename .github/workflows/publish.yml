@@ -19,5 +19,7 @@ jobs:
       run: |
         cargo build --verbose
         cargo test --verbose
+    - name: Publish
+      run: |
         cargo login ${{ secrets.CRATES_IO_TOKEN }}
         cargo publish --verbose
