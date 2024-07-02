@@ -18,6 +18,10 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - name: Initialize Git
+      run: |
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        git config --global user.name "github-actions"
     - name: Install cargo-release
       run: cargo install cargo-release
     - name: Build & Test
