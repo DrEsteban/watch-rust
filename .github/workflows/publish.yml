@@ -15,12 +15,13 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - name: Install cargo-release
+      run: cargo install cargo-release
     - name: Build & Test
       run: |
         cargo build --verbose
         cargo test --verbose
-    # TODO: cargo install cargo-incversion
     - name: Publish
       run: |
         cargo login ${{ secrets.CRATES_IO_TOKEN }}
-        cargo publish --verbose
+        cargo release patch --execute --push-remote origin --verbose
