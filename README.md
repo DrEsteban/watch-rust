@@ -2,6 +2,8 @@
 
 A ~silly~ command-line tool similar to Linux's `watch`, written in Rust!
 
+It's not very fleshed out right now... I'm just using it as an excuse to play with Rust.
+
 ## Motivation
 
 I wanted to get an introduction to Rust, so I decided to write a simple tool that I use often: [`watch`](https://www.unix.com/man-page/Linux/1/watch/).
