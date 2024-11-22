@@ -15,7 +15,7 @@ exclude = [
 
 [dependencies]
 clap = { version = "4.5.8", features = ["derive", "cargo"] }
-crossterm = "0.27.0"
+crossterm = "0.28.1"
 
 [[bin]]
 name = "watchr"
