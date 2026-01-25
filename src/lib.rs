@@ -143,7 +143,9 @@ fn format_diff(old: &str, new: &str, permanent: bool) -> String {
     result
 }
 
-/// Highlights inline character differences for a cleaner view
+/// Highlights inline character differences for a cleaner view.
+/// This function is provided for future use when inline character-level
+/// diff highlighting is desired instead of line-level diffs.
 #[allow(dead_code)]
 fn format_diff_inline(old: &str, new: &str) -> String {
     let diff = TextDiff::from_chars(old, new);
@@ -179,7 +181,7 @@ fn create_progress_bar(total: u64, message: &str) -> ProgressBar {
         ProgressStyle::with_template(
             "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}",
         )
-        .unwrap()
+        .expect("Invalid progress bar template")
         .progress_chars("#>-"),
     );
     pb.set_message(message.to_string());
@@ -193,7 +195,7 @@ fn create_duration_progress_bar(duration_secs: u64) -> ProgressBar {
         ProgressStyle::with_template(
             "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {elapsed}/{duration} {msg}",
         )
-        .unwrap()
+        .expect("Invalid progress bar template")
         .progress_chars("#>-"),
     );
     pb.set_message("Running...");
