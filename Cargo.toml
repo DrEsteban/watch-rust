@@ -1,7 +1,7 @@
 [package]
 name = "watch-rs"
-version = "0.1.13"
-description = "A Rust implementation of Linux's `watch`"
+version = "0.2.0"
+description = "A Rust implementation of Linux's `watch` with extended features"
 edition = "2021"
 authors = ["DrEsteban"]
 license-file = "LICENSE"
@@ -15,7 +15,11 @@ exclude = [
 
 [dependencies]
 clap = { version = "4.5.8", features = ["derive", "cargo"] }
-crossterm = "0.27.0"
+crossterm = "0.28.0"
+indicatif = "0.17.8"
+chrono = "0.4.38"
+similar = "2.6.0"
+console = "0.15.8"
 
 [[bin]]
 name = "watchr"
