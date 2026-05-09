@@ -36,3 +36,46 @@ jobs:
 
       - name: Build release
         run: cargo build --release --verbose
+
+      - name: Smoke test release binary (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          ./target/release/watchr --help
+          ./target/release/watchr --version
+
+      - name: Smoke test release binary (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          .\target\release\watchr.exe --help
+          .\target\release\watchr.exe --version
+
+      - name: Install WiX Toolset
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          choco install wixtoolset --no-progress -y
+          $programFilesX86 = [Environment]::GetFolderPath('ProgramFilesX86')
+          $wixBin = Join-Path $programFilesX86 'WiX Toolset v3.14\bin'
+          if (!(Test-Path $wixBin) -and $env:WIX) {
+            $wixBin = Join-Path $env:WIX 'bin'
+          }
+          if (!(Test-Path $wixBin)) {
+            throw "WiX Toolset bin directory was not found"
+          }
+          $wixBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Install cargo-wix
+        if: matrix.os == 'windows-latest'
+        run: cargo install cargo-wix --version 0.3.9 --locked
+
+      - name: Build Windows MSI
+        if: matrix.os == 'windows-latest'
+        run: cargo wix --no-build --output target/wix
+
+      - name: Upload Windows MSI
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: watchr-windows-msi
+          path: target/wix/*.msi
