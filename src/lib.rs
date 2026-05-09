@@ -296,7 +296,7 @@ pub fn watch(options: WatchOptions) -> Result<()> {
         Some(ExecutionLimit::Until(until)) => {
             let now = Local::now();
             if *until > now {
-                let duration = (*until - now).num_seconds().max(1) as u64;
+                let duration = (((*until - now).num_milliseconds() + 999) / 1000) as u64;
                 Some(create_duration_progress_bar(duration))
             } else {
                 return Err(Error::new(
