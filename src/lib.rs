@@ -68,6 +68,8 @@ pub struct WatchOptions {
     pub beep: bool,
     /// Interpret ANSI color and style sequences
     pub color: bool,
+    /// Strip ANSI color and style sequences
+    pub no_color: bool,
     /// Highlight differences between successive updates
     pub differences: bool,
     /// Show all changes since first iteration (permanent diff mode)
@@ -100,6 +102,7 @@ impl Default for WatchOptions {
             interval: 2.0,
             beep: false,
             color: false,
+            no_color: false,
             differences: false,
             differences_permanent: false,
             errexit: false,
@@ -112,6 +115,22 @@ impl Default for WatchOptions {
             exec: false,
             execution_limit: None,
         }
+    }
+}
+
+struct TerminalSession {
+    no_wrap: bool,
+}
+
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        let mut out = stdout();
+        if self.no_wrap {
+            let _ = execute!(out, LeaveAlternateScreen, Show, EnableLineWrap);
+        } else {
+            let _ = execute!(out, LeaveAlternateScreen, Show);
+        }
+        let _ = disable_raw_mode();
     }
 }
 
@@ -128,7 +147,10 @@ fn format_diff(old: &str, new: &str, permanent: bool) -> String {
         match change.tag() {
             ChangeTag::Delete => {
                 if permanent {
-                    result.push_str(&format!("{}", removed_style.apply_to(format!("-{}", change))));
+                    result.push_str(&format!(
+                        "{}",
+                        removed_style.apply_to(format!("-{}", change))
+                    ));
                 }
             }
             ChangeTag::Insert => {
@@ -137,6 +159,26 @@ fn format_diff(old: &str, new: &str, permanent: bool) -> String {
             ChangeTag::Equal => {
                 result.push_str(&format!("{}", unchanged_style.apply_to(change.to_string())));
             }
+        }
+    }
+
+    result
+}
+
+fn strip_ansi_codes(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            result.push(ch);
         }
     }
 
@@ -154,10 +196,16 @@ fn format_diff_inline(old: &str, new: &str) -> String {
     for change in diff.iter_all_changes() {
         match change.tag() {
             ChangeTag::Delete => {
-                result.push_str(&format!("{}", style(change.to_string()).red().on_white().bold()));
+                result.push_str(&format!(
+                    "{}",
+                    style(change.to_string()).red().on_white().bold()
+                ));
             }
             ChangeTag::Insert => {
-                result.push_str(&format!("{}", style(change.to_string()).green().on_black().bold()));
+                result.push_str(&format!(
+                    "{}",
+                    style(change.to_string()).green().on_black().bold()
+                ));
             }
             ChangeTag::Equal => {
                 result.push_str(&change.to_string());
@@ -241,9 +289,7 @@ pub fn watch(options: WatchOptions) -> Result<()> {
 
     // Set up progress bar if we have an execution limit
     let progress_bar: Option<ProgressBar> = match &options.execution_limit {
-        Some(ExecutionLimit::Count(count)) => {
-            Some(create_progress_bar(*count, "Executions"))
-        }
+        Some(ExecutionLimit::Count(count)) => Some(create_progress_bar(*count, "Executions")),
         Some(ExecutionLimit::Duration(duration)) => {
             Some(create_duration_progress_bar(duration.as_secs()))
         }
@@ -253,18 +299,28 @@ pub fn watch(options: WatchOptions) -> Result<()> {
                 let duration = (*until - now).num_seconds().max(1) as u64;
                 Some(create_duration_progress_bar(duration))
             } else {
-                return Err(Error::new(ErrorKind::InvalidInput, "Target time is in the past"));
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "Target time is in the past",
+                ));
             }
         }
         None => None,
     };
 
     enable_raw_mode()?;
-    if options.no_wrap {
-        execute!(stdout(), Hide, EnterAlternateScreen, DisableLineWrap)?;
+    let enter_result = if options.no_wrap {
+        execute!(stdout(), Hide, EnterAlternateScreen, DisableLineWrap)
     } else {
-        execute!(stdout(), Hide, EnterAlternateScreen, EnableLineWrap)?;
+        execute!(stdout(), Hide, EnterAlternateScreen, EnableLineWrap)
+    };
+    if let Err(err) = enter_result {
+        disable_raw_mode()?;
+        return Err(err);
     }
+    let terminal_session = TerminalSession {
+        no_wrap: options.no_wrap,
+    };
 
     let mut last_output = String::new();
     let mut last_error = String::new();
@@ -390,7 +446,9 @@ pub fn watch(options: WatchOptions) -> Result<()> {
         }
 
         // Check for output change
-        let output_changed = previous_output.as_ref().is_some_and(|prev| prev != &current_output);
+        let output_changed = previous_output
+            .as_ref()
+            .is_some_and(|prev| prev != &current_output);
 
         if options.chgexit && output_changed {
             break 'watch_loop;
@@ -409,7 +467,7 @@ pub fn watch(options: WatchOptions) -> Result<()> {
         }
 
         // Determine what to display
-        let display_output = if options.differences {
+        let mut display_output = if options.differences {
             let compare_with = if options.differences_permanent {
                 first_output.as_deref().unwrap_or("")
             } else {
@@ -422,6 +480,12 @@ pub fn watch(options: WatchOptions) -> Result<()> {
             }
         } else {
             current_output.clone()
+        };
+        let display_error = if options.no_color {
+            display_output = strip_ansi_codes(&display_output);
+            strip_ansi_codes(&current_error)
+        } else {
+            current_error.clone()
         };
 
         // Print output
@@ -444,13 +508,13 @@ pub fn watch(options: WatchOptions) -> Result<()> {
         queue!(stdout(), MoveToNextLine(1))?;
 
         // Print stderr if any
-        if !current_error.is_empty() {
+        if !display_error.is_empty() {
             queue!(
                 stdout(),
                 MoveToNextLine(1),
                 PrintStyledContent("StdErr:".bold().underlined().red()),
                 MoveToNextLine(1),
-                PrintStyledContent(current_error.clone().red()),
+                PrintStyledContent(display_error.red()),
                 MoveToNextLine(1),
             )?;
         }
@@ -512,7 +576,10 @@ pub fn watch(options: WatchOptions) -> Result<()> {
         let (term_width, term_height) = size().unwrap_or((80, 24));
         queue!(
             stdout(),
-            MoveTo(term_width.saturating_sub(QUIT_MSG.len() as u16), term_height - 1),
+            MoveTo(
+                term_width.saturating_sub(QUIT_MSG.len() as u16),
+                term_height - 1
+            ),
             PrintStyledContent(QUIT_MSG.italic()),
         )?;
 
@@ -578,7 +645,7 @@ pub fn watch(options: WatchOptions) -> Result<()> {
     }
 
     // Leave alternate screen and print final output
-    execute!(stdout(), LeaveAlternateScreen)?;
+    drop(terminal_session);
 
     queue!(
         stdout(),
@@ -608,7 +675,11 @@ pub fn watch(options: WatchOptions) -> Result<()> {
             MoveToNextLine(1),
             PrintStyledContent("─".repeat(40).dim()),
             MoveToNextLine(1),
-            PrintStyledContent(format!("Total executions: {}", execution_count).green().bold()),
+            PrintStyledContent(
+                format!("Total executions: {}", execution_count)
+                    .green()
+                    .bold()
+            ),
             MoveToNextLine(1),
             PrintStyledContent(
                 format!("Total time: {:.2}s", start_time.elapsed().as_secs_f64())
@@ -621,11 +692,7 @@ pub fn watch(options: WatchOptions) -> Result<()> {
 
     stdout().flush()?;
 
-    execute!(stdout(), Show)?;
-    if options.no_wrap {
-        execute!(stdout(), EnableLineWrap)?;
-    }
-    disable_raw_mode()
+    Ok(())
 }
 
 #[cfg(test)]
@@ -638,6 +705,7 @@ mod tests {
         assert_eq!(options.interval, 2.0);
         assert!(!options.beep);
         assert!(!options.color);
+        assert!(!options.no_color);
         assert!(!options.differences);
     }
 
@@ -665,5 +733,11 @@ mod tests {
             ExecutionLimit::Duration(d) => assert_eq!(d, Duration::from_secs(60)),
             _ => panic!("Expected Duration variant"),
         }
+    }
+
+    #[test]
+    fn test_strip_ansi_codes() {
+        assert_eq!(strip_ansi_codes("\x1b[31mred\x1b[0m plain"), "red plain");
+        assert_eq!(strip_ansi_codes("plain"), "plain");
     }
 }
