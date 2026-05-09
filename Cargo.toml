@@ -13,6 +13,9 @@ exclude = [
     ".vscode"
 ]
 
+[package.metadata.wix]
+year = "2026"
+
 [dependencies]
 clap = { version = "4.6.1", features = ["derive", "cargo"] }
 crossterm = "0.29.0"
