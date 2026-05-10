@@ -116,7 +116,7 @@ jobs:
 
       - name: Install Winget-Create
         shell: pwsh
-        run: Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+        run: choco install wingetcreate --no-progress -y
 
       - name: Submit WinGet package update
         shell: pwsh
@@ -136,4 +136,4 @@ jobs:
           $installerUrl = "https://github.com/${{ github.repository }}/releases/download/${{ github.event.release.tag_name }}/$($msi.Name)"
           $installer = "$installerUrl|x64|machine"
 
-          .\wingetcreate.exe update $env:WINGET_PACKAGE_IDENTIFIER --urls $installer --version $version --submit --token $env:WATCHR_GITHUB_PAT --no-open
+          wingetcreate update $env:WINGET_PACKAGE_IDENTIFIER --urls $installer --version $version --submit --token $env:WATCHR_GITHUB_PAT --no-open
