@@ -5,10 +5,13 @@ on:
     branches: [ "master" ]
   pull_request:
     branches: [ "master" ]
+  release:
+    types: [ "published" ]
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+  WINGET_PACKAGE_IDENTIFIER: DrEsteban.watch-rs
 
 permissions:
   contents: read
@@ -79,3 +82,58 @@ jobs:
         with:
           name: watchr-windows-msi
           path: target/wix/*.msi
+
+  winget:
+    name: Submit Windows MSI to WinGet
+    if: github.event_name == 'release'
+    needs: test
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Windows MSI
+        uses: actions/download-artifact@v4
+        with:
+          name: watchr-windows-msi
+          path: target/wix
+
+      - name: Upload MSI to GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $msi = Get-ChildItem -Path target/wix -Filter *.msi | Select-Object -First 1
+          if ($null -eq $msi) {
+            throw "No MSI was found in target/wix"
+          }
+          gh release upload "${{ github.event.release.tag_name }}" $msi.FullName --clobber --repo "${{ github.repository }}"
+
+      - name: Install .NET runtime for Winget-Create
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.x'
+
+      - name: Install Winget-Create
+        shell: pwsh
+        run: Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+
+      - name: Submit WinGet package update
+        shell: pwsh
+        env:
+          WATCHR_GITHUB_PAT: ${{ secrets.WATCHR_GITHUB_PAT }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WATCHR_GITHUB_PAT)) {
+            throw "WATCHR_GITHUB_PAT secret is required to submit the WinGet package update"
+          }
+
+          $msi = Get-ChildItem -Path target/wix -Filter *.msi | Select-Object -First 1
+          if ($null -eq $msi) {
+            throw "No MSI was found in target/wix"
+          }
+
+          $version = "${{ github.event.release.tag_name }}" -replace '^v', ''
+          $installerUrl = "https://github.com/${{ github.repository }}/releases/download/${{ github.event.release.tag_name }}/$($msi.Name)"
+          $installer = "$installerUrl|x64|machine"
+
+          .\wingetcreate.exe update $env:WINGET_PACKAGE_IDENTIFIER --urls $installer --version $version --submit --token $env:WATCHR_GITHUB_PAT --no-open
