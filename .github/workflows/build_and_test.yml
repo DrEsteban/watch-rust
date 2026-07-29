@@ -11,13 +11,13 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  WINGET_PACKAGE_IDENTIFIER: DrEsteban.watch-rs
+  WINGET_PACKAGE_IDENTIFIER: DrEsteban.watch-rust
 
 permissions:
   contents: read
 
 jobs:
-  test:
+  build-and-test:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -86,7 +86,7 @@ jobs:
   winget:
     name: Submit Windows MSI to WinGet
     if: github.event_name == 'release'
-    needs: test
+    needs: build-and-test
     runs-on: windows-latest
     permissions:
       contents: write
