@@ -2,22 +2,178 @@ name: Build and Test
 
 on:
   push:
-    branches: [ "master" ]
+    branches: ["master"]
   pull_request:
-    branches: [ "master" ]
+    branches: ["master"]
+  release:
+    types: ["published"]
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+  WINGET_PACKAGE_IDENTIFIER: DrEsteban.watch-rust
+
+permissions:
+  contents: read
 
 jobs:
-  build:
+  build-and-test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
 
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --all-targets --locked --verbose
+
+      - name: Build release
+        run: cargo build --release --locked --verbose
+
+      - name: Smoke test release binary (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          ./target/release/watchr --help
+          ./target/release/watchr --version
+
+      - name: Smoke test release binary (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          ./target/release/watchr --help
+          ./target/release/watchr --version
+
+      - name: Smoke test release binary (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          .\target\release\watchr.exe --help
+          .\target\release\watchr.exe --version
+
+      - name: Install WiX Toolset
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          choco install wixtoolset --version=3.14.1.20250415 --no-progress -y
+          $programFilesX86 = [Environment]::GetFolderPath('ProgramFilesX86')
+          $wixBin = Join-Path $programFilesX86 'WiX Toolset v3.14\bin'
+          if (!(Test-Path $wixBin) -and $env:WIX) {
+            $wixBin = Join-Path $env:WIX 'bin'
+          }
+          if (!(Test-Path $wixBin)) {
+            throw "WiX Toolset bin directory was not found"
+          }
+          $wixBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Install cargo-wix
+        if: matrix.os == 'windows-latest'
+        run: cargo install cargo-wix --version 0.3.9 --locked
+
+      - name: Build Windows MSI
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force target/wix | Out-Null
+          cargo wix --no-build --output target/wix/
+
+      - name: Upload Windows MSI
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: watchr-windows-msi
+          path: target/wix/*.msi
+          if-no-files-found: error
+
+  msrv:
+    name: Rust 1.85 MSRV
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Build & Test
-      run: |
-        cargo build --verbose
-        cargo test --verbose
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install MSRV toolchain
+        run: rustup toolchain install 1.85.0 --profile minimal
+
+      - name: Check MSRV
+        run: cargo +1.85.0 check --all-targets --locked
+
+  winget:
+    name: Submit Windows MSI to WinGet
+    if: github.event_name == 'release'
+    needs: [build-and-test, msrv]
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download Windows MSI
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: watchr-windows-msi
+          path: target/wix
+
+      - name: Validate release version
+        shell: pwsh
+        run: |
+          $version = "${{ github.event.release.tag_name }}" -replace '^v', ''
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $packageVersion = $metadata.packages[0].version
+          if ($version -ne $packageVersion) {
+            throw "Release tag version '$version' does not match Cargo package version '$packageVersion'"
+          }
+
+      - name: Upload MSI to GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $msi = Get-ChildItem -Path target/wix -Filter *.msi | Select-Object -First 1
+          if ($null -eq $msi) {
+            throw "No MSI was found in target/wix"
+          }
+          gh release upload "${{ github.event.release.tag_name }}" $msi.FullName --clobber --repo "${{ github.repository }}"
+
+      - name: Install .NET runtime for Winget-Create
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: '6.x'
+
+      - name: Install Winget-Create
+        shell: pwsh
+        run: choco install wingetcreate --version=1.6.1 --no-progress -y
+
+      - name: Submit WinGet package update
+        shell: pwsh
+        env:
+          WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WATCHR_GITHUB_PAT }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINGET_CREATE_GITHUB_TOKEN)) {
+            throw "WATCHR_GITHUB_PAT secret is required to submit the WinGet package update"
+          }
+
+          $msi = Get-ChildItem -Path target/wix -Filter *.msi | Select-Object -First 1
+          if ($null -eq $msi) {
+            throw "No MSI was found in target/wix"
+          }
+
+          wingetcreate show $env:WINGET_PACKAGE_IDENTIFIER
+          if ($LASTEXITCODE -ne 0) {
+            throw "The initial $env:WINGET_PACKAGE_IDENTIFIER manifest must be submitted to WinGet before automated updates can run"
+          }
+
+          $version = "${{ github.event.release.tag_name }}" -replace '^v', ''
+          $installerUrl = "https://github.com/${{ github.repository }}/releases/download/${{ github.event.release.tag_name }}/$($msi.Name)"
+          $installer = "$installerUrl|x64|machine"
+
+          wingetcreate update $env:WINGET_PACKAGE_IDENTIFIER --urls $installer --version $version --submit --no-open
