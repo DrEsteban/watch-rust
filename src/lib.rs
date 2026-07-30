@@ -22,7 +22,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{self, stdout, IsTerminal, Read, Result, Write},
     path::{Path, PathBuf},
-    process::{Command, ExitStatus, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -39,6 +39,7 @@ use crossterm::{
         EnterAlternateScreen, LeaveAlternateScreen,
     },
 };
+use os_pipe::pipe;
 use unicode_width::UnicodeWidthChar;
 
 const MIN_INTERVAL: f64 = 0.1;
@@ -299,7 +300,6 @@ impl ScreenBuilder {
         self.row = self.row.saturating_add(1);
         self.column = 0;
         self.line_truncated = false;
-        self.ensure_line();
     }
 
     fn put_space(&mut self) {
@@ -428,18 +428,20 @@ impl ScreenBuilder {
                 29 => self.style.attributes.unset(Attribute::CrossedOut),
                 30..=37 => self.style.foreground_color = Some(standard_color(value - 30, false)),
                 38 => {
-                    if let Some((color, consumed)) = extended_color(&values[index + 1..]) {
+                    let (color, consumed) = extended_color(&values[index + 1..]);
+                    if let Some(color) = color {
                         self.style.foreground_color = Some(color);
-                        index += consumed;
                     }
+                    index += consumed;
                 }
                 39 => self.style.foreground_color = None,
                 40..=47 => self.style.background_color = Some(standard_color(value - 40, false)),
                 48 => {
-                    if let Some((color, consumed)) = extended_color(&values[index + 1..]) {
+                    let (color, consumed) = extended_color(&values[index + 1..]);
+                    if let Some(color) = color {
                         self.style.background_color = Some(color);
-                        index += consumed;
                     }
+                    index += consumed;
                 }
                 49 => self.style.background_color = None,
                 90..=97 => self.style.foreground_color = Some(standard_color(value - 90, true)),
@@ -513,22 +515,24 @@ fn standard_color(index: u16, bright: bool) -> Color {
     }
 }
 
-fn extended_color(values: &[u16]) -> Option<(Color, usize)> {
+fn extended_color(values: &[u16]) -> (Option<Color>, usize) {
     match values {
-        [5, value, ..] if *value <= u8::MAX as u16 => Some((Color::AnsiValue(*value as u8), 2)),
+        [5, value, ..] if *value <= u8::MAX as u16 => (Some(Color::AnsiValue(*value as u8)), 2),
+        [5, ..] => (None, values.len().min(2)),
         [2, red, green, blue, ..]
             if *red <= u8::MAX as u16 && *green <= u8::MAX as u16 && *blue <= u8::MAX as u16 =>
         {
-            Some((
-                Color::Rgb {
+            (
+                Some(Color::Rgb {
                     r: *red as u8,
                     g: *green as u8,
                     b: *blue as u8,
-                },
+                }),
                 4,
-            ))
+            )
         }
-        _ => None,
+        [2, ..] => (None, values.len().min(4)),
+        _ => (None, 0),
     }
 }
 
@@ -755,8 +759,11 @@ fn build_header(
     }
     let left = format!("Every {interval:.1}s: {}", printable_text(command));
     let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
-    let host = env::var("HOSTNAME")
-        .or_else(|_| env::var("COMPUTERNAME"))
+    let host = hostname::get()
+        .ok()
+        .and_then(|name| name.into_string().ok())
+        .or_else(|| env::var("HOSTNAME").ok())
+        .or_else(|| env::var("COMPUTERNAME").ok())
         .unwrap_or_default();
     let right = if host.is_empty() {
         timestamp.to_string()
@@ -830,6 +837,15 @@ struct CommandRun {
     output: Vec<u8>,
     status: ExitStatus,
     elapsed: Duration,
+    input: RunInput,
+}
+
+#[derive(Default)]
+struct RunInput {
+    quit: bool,
+    run_now: bool,
+    resized: bool,
+    screenshot: bool,
 }
 
 fn execute_command(
@@ -859,35 +875,23 @@ fn execute_command(
         command
     };
 
+    let (output_reader, output_writer) = pipe()?;
+    let error_writer = output_writer.try_clone()?;
     command
         .env("COLUMNS", width.to_string())
         .env("LINES", height.to_string())
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdout(Stdio::from(output_writer))
+        .stderr(Stdio::from(error_writer));
 
     let started = Instant::now();
     let mut child = command.spawn()?;
-    let child_stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::other("failed to capture command stdout"))?;
-    let child_stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| io::Error::other("failed to capture command stderr"))?;
+    drop(command);
+    let output_thread = thread::spawn(move || read_limited(output_reader, capture_limit));
+    let (status, input) = wait_for_child(&mut child, options.no_rerun)?;
+    let (mut command_output, truncated) = join_reader(output_thread)?;
 
-    let stdout_reader = thread::spawn(move || read_limited(child_stdout, capture_limit));
-    let stderr_reader = thread::spawn(move || read_limited(child_stderr, capture_limit));
-    let status = child.wait()?;
-    let (mut command_output, stdout_truncated) = join_reader(stdout_reader)?;
-    let (error_output, stderr_truncated) = join_reader(stderr_reader)?;
-
-    if !command_output.is_empty() && !error_output.is_empty() && !command_output.ends_with(b"\n") {
-        command_output.push(b'\n');
-    }
-    command_output.extend(error_output);
-    if stdout_truncated || stderr_truncated {
+    if truncated {
         if !command_output.ends_with(b"\n") {
             command_output.push(b'\n');
         }
@@ -898,7 +902,63 @@ fn execute_command(
         output: command_output,
         status,
         elapsed: started.elapsed(),
+        input,
     })
+}
+
+fn wait_for_child(child: &mut Child, no_rerun: bool) -> Result<(ExitStatus, RunInput)> {
+    let mut input = RunInput::default();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok((status, input)),
+            Ok(None) => {}
+            Err(error) => {
+                kill_and_reap(child);
+                return Err(error);
+            }
+        }
+
+        let has_event = match poll(Duration::from_millis(50)) {
+            Ok(has_event) => has_event,
+            Err(error) => {
+                kill_and_reap(child);
+                return Err(error);
+            }
+        };
+        if !has_event {
+            continue;
+        }
+
+        let event = match read() {
+            Ok(event) => event,
+            Err(error) => {
+                kill_and_reap(child);
+                return Err(error);
+            }
+        };
+        match event {
+            Event::Key(event) if key_is_active(event) => {
+                if is_interrupt_key(event) {
+                    input.quit = true;
+                    let _ = child.kill();
+                    return child.wait().map(|status| (status, input));
+                }
+                match event.code {
+                    KeyCode::Char('q') => input.quit = true,
+                    KeyCode::Char(' ') => input.run_now = true,
+                    KeyCode::Char('s') => input.screenshot = true,
+                    _ => {}
+                }
+            }
+            Event::Resize(_, _) if !no_rerun => input.resized = true,
+            _ => {}
+        }
+    }
+}
+
+fn kill_and_reap(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn read_limited(mut reader: impl Read, limit: usize) -> Result<(Vec<u8>, bool)> {
@@ -1129,6 +1189,30 @@ fn frame_lines(
     lines
 }
 
+fn follow_frame_lines(
+    header: &[String],
+    screen: &Screen,
+    progress: Option<&str>,
+    layout: Layout,
+) -> Vec<String> {
+    let mut lines = header
+        .iter()
+        .map(|line| truncate_to_width(line, layout.width))
+        .collect::<Vec<_>>();
+    lines.extend(
+        screen
+            .plain_lines()
+            .into_iter()
+            .map(|line| truncate_to_width(&line, layout.width)),
+    );
+    if let Some(progress) = progress {
+        lines.push(truncate_to_width(progress, layout.width));
+    }
+    let first_visible = lines.len().saturating_sub(layout.height);
+    lines.drain(..first_visible);
+    lines
+}
+
 fn save_screenshot(directory: Option<&Path>, lines: &[String]) -> Result<PathBuf> {
     let directory = directory.unwrap_or_else(|| Path::new("."));
     let timestamp = Local::now().format("%Y%m%d-%H%M%S");
@@ -1218,8 +1302,11 @@ fn key_is_active(event: KeyEvent) -> bool {
 }
 
 fn is_quit_key(event: KeyEvent) -> bool {
-    event.code == KeyCode::Char('q')
-        || (event.code == KeyCode::Char('c') && event.modifiers.contains(KeyModifiers::CONTROL))
+    event.code == KeyCode::Char('q') || is_interrupt_key(event)
+}
+
+fn is_interrupt_key(event: KeyEvent) -> bool {
+    event.code == KeyCode::Char('c') && event.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 fn print_final_summary(
@@ -1358,10 +1445,20 @@ pub fn watch_with_exit_code(options: WatchOptions) -> Result<i32> {
                 layout,
             )?;
         }
-        let current_frame = frame_lines(&header, &screen, progress.as_deref(), layout);
+        let current_frame = if options.follow {
+            follow_frame_lines(&header, &screen, progress.as_deref(), layout)
+        } else {
+            frame_lines(&header, &screen, progress.as_deref(), layout)
+        };
         output.flush()?;
         last_screen = Some(screen.clone());
 
+        if run.input.screenshot {
+            save_screenshot(options.shots_dir.as_deref(), &current_frame)?;
+        }
+        if run.input.quit {
+            break;
+        }
         if options.errexit && !run.status.success() {
             return_code = status_code(&run.status);
             wait_for_error_key(options.shots_dir.as_deref(), &current_frame)?;
@@ -1381,6 +1478,15 @@ pub fn watch_with_exit_code(options: WatchOptions) -> Result<i32> {
         }
 
         previous_screen = Some(screen);
+        if run.input.resized {
+            previous_screen = None;
+            permanent_highlights.clear();
+            unchanged_count = 0;
+            continue;
+        }
+        if run.input.run_now {
+            continue;
+        }
         let mut wait_duration = if options.precise {
             interval_duration.saturating_sub(run_started.elapsed())
         } else {
@@ -1484,12 +1590,32 @@ mod tests {
     }
 
     #[test]
+    fn malformed_extended_color_does_not_apply_trailing_attributes() {
+        let screen = Screen::parse(b"\x1b[38;5;300mtext", 20, 1, false, true);
+        let style = screen.cell(0, 0).unwrap().style;
+        assert_eq!(style.foreground_color, None);
+        assert!(!style.attributes.has(Attribute::SlowBlink));
+    }
+
+    #[test]
     fn parser_expands_tabs_and_wraps_at_display_width() {
         let wrapped = Screen::parse(b"a\tb", 4, 3, false, false);
         assert_eq!(plain(&wrapped), ["a   ", "b"]);
 
         let truncated = Screen::parse(b"a\tb", 4, 3, true, false);
         assert_eq!(plain(&truncated), ["a   "]);
+    }
+
+    #[test]
+    fn parser_does_not_add_a_line_after_a_trailing_newline() {
+        assert_eq!(
+            plain(&Screen::parse(b"line\n", 20, 2, false, false)),
+            ["line"]
+        );
+        assert_eq!(
+            plain(&Screen::parse(b"line\n\n", 20, 3, false, false)),
+            ["line", ""]
+        );
     }
 
     #[test]
@@ -1542,6 +1668,16 @@ mod tests {
         assert!(display_width(&progress) <= 20);
         assert!(progress.contains('#'));
         assert!(display_width(&format_progress(0.5, "long", 4)) <= 4);
+    }
+
+    #[test]
+    fn follow_screenshot_frame_keeps_visible_tail() {
+        let screen = Screen::parse(b"one\ntwo\nthree", 10, 3, false, false);
+        let layout = Layout::new(10, 2, true, false);
+        assert_eq!(
+            follow_frame_lines(&[], &screen, None, layout),
+            ["two", "three"]
+        );
     }
 
     #[test]

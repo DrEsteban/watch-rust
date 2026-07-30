@@ -1,135 +1,151 @@
-# watch-rust (watch-rs)
+# watch-rust (`watch-rs`)
 
-A powerful cross-platform command-line tool similar to Linux's `watch`, written in Rust!
-
-This tool repeatedly executes a command and displays its output, allowing you to watch the program output change over time. It includes all standard features from the Linux `watch` command plus extended functionality.
+`watchr` is a cross-platform Rust implementation of Linux's `watch`. It repeatedly runs a command in a full-screen terminal display and highlights, follows, or stops on output changes.
 
 ## Features
 
-### Standard Linux `watch` Features
-- **Interval control** (`-n, --interval`): Specify update interval in seconds (minimum 0.1s)
-- **Beep on error** (`-b, --beep`): Audible alert if command returns non-zero exit code
-- **Color support** (`-c, --color`): Interpret ANSI color and style sequences
-- **No color** (`-C, --no-color`): Strip ANSI color sequences from output
-- **Diff highlighting** (`-d, --differences`): Highlight changes between successive updates with colors
-- **Permanent diff** (`--differences-permanent`): Show all changes since the first iteration
-- **Exit on error** (`-e, --errexit`): Freeze on command error and exit after keypress
-- **Exit on change** (`-g, --chgexit`): Exit when the output changes
-- **Precise timing** (`-p, --precise`): Attempt to run command every interval seconds precisely
-- **Exit on unchanged** (`-q, --equexit`): Exit when output doesn't change for N cycles
-- **No rerun on resize** (`-r, --no-rerun`): Don't rerun command when terminal is resized
-- **No title** (`-t, --no-title`): Hide the header showing interval, command, and time
-- **No line wrap** (`-w, --no-wrap`): Truncate long lines instead of wrapping
-- **Exec mode** (`-x, --exec`): Pass command directly to exec instead of shell
+### Linux `watch` compatibility
 
-### Extended Features
-- **Count mode** (`--count N`): Execute the command exactly N times, then exit
-- **Duration mode** (`--duration DURATION`): Execute for a specified time span (e.g., "1h30m", "45s", "2h")
-- **Until mode** (`--until DATETIME`): Execute until a specific date/time (ISO 8601 format)
-- **Progress bar**: Nicely formatted progress bar display for all limit modes
-- **Cross-platform**: Works on Windows, macOS, and Linux
-- **Modern diff highlighting**: Uses console colors for clear visual diff output
+- Interval control with `-n, --interval`, including `WATCH_INTERVAL`
+- Beep on error with `-b, --beep`
+- Safe ANSI SGR color handling with `-c, --color` and `-C, --no-color`
+- Character-level change highlighting with `-d, --differences[=permanent]`
+- Command-status propagation with `-e, --errexit`
+- Scrolling output with `-f, --follow`
+- Exit on changed or unchanged visible output with `-g, --chgexit` and `-q, --equexit`
+- Precise scheduling with `-p, --precise`
+- Resize, title, wrapping, and direct-exec controls
+- Plain-text screenshots with `s` and `-s, --shotsdir`
+- Immediate reruns with the spacebar
+
+### Extended limits
+
+- `--count N` runs exactly N times
+- `--duration DURATION` runs for a bounded duration
+- `--until DATETIME` runs until a local or RFC 3339 timestamp
+- Bounded runs show progress and print a final summary
 
 ## Installation
 
-### From Cargo (crates.io)
+From crates.io:
+
 ```shell
 cargo install watch-rs
 watchr --help
 ```
 
-### From Source
+From source:
+
 ```shell
 git clone https://github.com/DrEsteban/watch-rust
 cd watch-rust
-cargo install --path .
+cargo install --path . --locked
 ```
 
 ## Usage
 
-### Basic Usage
 ```shell
-# Watch a command every 2 seconds (default)
-watchr "ls -la"
+# Run every two seconds
+watchr ls -la
 
-# Watch with custom interval
-watchr -n 5 "df -h"
+# Run every half-second
+watchr -n 0.5 df -h
 
-# Watch with diff highlighting
-watchr -d "date"
+# Use a shell pipeline
+watchr 'cat /proc/meminfo | head'
+
+# Bypass the shell and preserve argument boundaries
+watchr --exec printf '%s\n' 'hello world'
 ```
 
-### Execution Limits
+Option parsing stops at the command. Arguments after it, including values beginning with `-`, are passed to the watched command.
+
+### Differences
+
 ```shell
-# Execute exactly 10 times
-watchr --count 10 "echo hello"
+# Highlight changes since the previous update
+watchr -d date
 
-# Execute for 5 minutes
-watchr --duration 5m "date"
-
-# Execute for 1 hour and 30 minutes
-watchr --duration 1h30m "uptime"
-
-# Execute until a specific time
-watchr --until "2024-12-31T23:59:59" "date"
+# Keep every highlight since the first update
+watchr -d1 date
+watchr --differences=permanent date
 ```
 
-### Advanced Options
+`--differences-permanent` remains available as a descriptive alias.
+
+### Output and exit conditions
+
 ```shell
-# Highlight differences with permanent mode (shows all changes since start)
-watchr --differences-permanent "cat /proc/meminfo"
+# Scroll each update instead of clearing
+watchr --follow journalctl -n 5
 
-# Exit when output changes
-watchr -g "cat /var/log/syslog | tail -1"
+# Exit when visible output changes
+watchr --chgexit cat status.txt
 
-# Exit when output is stable for 5 cycles
-watchr -q 5 "date +%S"
+# Exit after five unchanged visible updates
+watchr --equexit 5 cat status.txt
 
-# Beep on error and exit
-watchr -b -e "some-command"
-
-# Precise timing mode
-watchr -p -n 1 "date +%N"
-
-# No title, no wrap
-watchr -t -w "ps aux"
+# Freeze on failure and return the command's status after a key press
+watchr --errexit health-check
 ```
 
-## Duration Format
+`--follow` cannot be combined with differences, `--chgexit`, or `--equexit` because those modes compare full-screen cells.
 
-The `--duration` option accepts flexible time formats:
-- `30s` or `30` - 30 seconds
-- `5m` - 5 minutes
-- `2h` - 2 hours
-- `1d` - 1 day
-- `1h30m` - 1 hour and 30 minutes
-- `2h45m30s` - 2 hours, 45 minutes, and 30 seconds
+### Execution limits
 
-## Exit Codes
+```shell
+watchr --count 10 echo hello
+watchr --duration 5m date
+watchr --until 2030-12-31T23:59:59 uptime
+watchr --until 2030-12-31T23:59:59Z uptime
+```
 
-- `0` - Success (normal exit or limit reached)
-- `1` - Command execution error
-- Other - Propagated from the watched command
+Duration components may use days, hours, minutes, and seconds:
 
-## Key Bindings
+- `30` or `30s`
+- `5m`
+- `2h`
+- `1d`
+- `1h30m`
+- `2h45m30s`
 
-While watching:
-- `q` - Quit
-- `Ctrl+C` - Quit
+### Interval behavior
+
+Intervals are clamped to the Linux `watch` range of 0.1 seconds through 2,678,400 seconds (31 days). Both `1.5` and `1,5` are accepted.
+
+Set a default with:
+
+```shell
+export WATCH_INTERVAL=5
+watchr date
+```
+
+An explicit `--interval` overrides the environment value.
+
+## Key controls
+
+- `q` or `Ctrl+C`: quit
+- Spacebar: run the command immediately
+- `s`: save the current visible frame as `watch_YYYYMMDD-HHMMSS`
+
+Use `--shotsdir DIR` to select the screenshot directory.
+
+## Exit status
+
+- `0`: normal exit, a reached limit, or a change condition
+- `1`: invalid input, terminal, or command-management failure
+- With `--errexit`: the command's non-zero exit code
+- With `--errexit` on Unix signal termination: `128 + signal`
 
 ## Requirements
 
-- Rust 1.70 or later
-- Works on Windows, macOS, and Linux
+- Rust 1.85 or later
+- An interactive terminal on Windows, macOS, or Linux
+
+## Release packaging
+
+Release CI builds and uploads a Windows MSI, then updates the existing `DrEsteban.watch-rust` WinGet manifest. The initial WinGet manifest must be submitted once with Winget-Create before automated updates can run.
 
 ## License
 
-See [LICENSE](LICENSE) file.
-
-## Author
-
-DrEsteban
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
+See [LICENSE](LICENSE).

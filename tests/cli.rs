@@ -12,11 +12,18 @@ fn help_includes_linux_watch_options() {
     let stdout = String::from_utf8(output.stdout).expect("help output is utf-8");
     for option in [
         "--beep",
+        "--color",
+        "--no-color",
         "--differences",
         "--errexit",
+        "--follow",
         "--chgexit",
         "--precise",
         "--equexit",
+        "--no-rerun",
+        "--shotsdir",
+        "--no-title",
+        "--no-wrap",
         "--exec",
         "--count",
         "--duration",
@@ -28,14 +35,16 @@ fn help_includes_linux_watch_options() {
 
 #[test]
 fn version_reports_package_version() {
-    let output = watchr()
-        .arg("--version")
-        .output()
-        .expect("run watchr --version");
+    for flag in ["-v", "--version"] {
+        let output = watchr().arg(flag).output().expect("run watchr version");
 
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).expect("version output is utf-8");
-    assert!(stdout.contains(env!("CARGO_PKG_VERSION")));
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).expect("version output is utf-8");
+        assert_eq!(
+            stdout.trim(),
+            format!("watchr {}", env!("CARGO_PKG_VERSION"))
+        );
+    }
 }
 
 #[test]
@@ -46,4 +55,31 @@ fn mutually_exclusive_limits_are_rejected() {
         .expect("run watchr with conflicting limit options");
 
     assert!(!output.status.success());
+}
+
+#[test]
+fn follow_rejects_output_tracking_options() {
+    for tracking_option in ["--differences", "--chgexit", "--equexit=2"] {
+        let output = watchr()
+            .args(["--follow", tracking_option, "echo"])
+            .output()
+            .expect("run watchr with conflicting follow option");
+
+        assert!(!output.status.success(), "{tracking_option} was accepted");
+    }
+}
+
+#[test]
+fn invalid_limit_and_interval_values_are_rejected() {
+    for args in [
+        ["--count", "0", "echo"].as_slice(),
+        ["--duration", "0s", "echo"].as_slice(),
+        ["--interval", "NaN", "echo"].as_slice(),
+    ] {
+        let output = watchr()
+            .args(args)
+            .output()
+            .expect("run watchr with an invalid value");
+        assert!(!output.status.success(), "{args:?} was accepted");
+    }
 }

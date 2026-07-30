@@ -22,6 +22,8 @@ anstyle-parse = "1.0.0"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.6.4", features = ["derive", "cargo", "env"] }
 crossterm = { version = "0.29.0", default-features = false, features = ["events", "windows"] }
+hostname = "0.4.2"
+os_pipe = "1.2.3"
 unicode-width = "0.2.2"
 
 [[bin]]
