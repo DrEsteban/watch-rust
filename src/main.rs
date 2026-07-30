@@ -1,12 +1,23 @@
-use std::fmt::Debug;
-use std::io::Result;
+use std::{fmt::Debug, io, path::PathBuf, process::ExitCode, time::Duration};
 
-use chrono::TimeZone;
-use clap::{crate_authors, Parser};
+use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
+use clap::{crate_authors, ArgAction, Parser};
 use watch_rs::{ExecutionLimit, WatchOptions};
 
+const MIN_INTERVAL: f64 = 0.1;
+const MAX_INTERVAL: f64 = 60.0 * 60.0 * 24.0 * 31.0;
+const SUCCESSIVE_DIFFERENCES: &str = "successive";
+
 #[derive(Parser, Debug)]
-#[command(version, author = crate_authors!(), about, long_about = None)]
+#[command(
+    name = "watchr",
+    version,
+    disable_version_flag = true,
+    author = crate_authors!(),
+    about,
+    long_about = None,
+    trailing_var_arg = true
+)]
 #[command(help_template(
     "\
 {before-help}{name} {version}
@@ -17,17 +28,20 @@ Author: {author-with-newline}{about-with-newline}
 "
 ))]
 struct Args {
-    /// The interval to run the command, in seconds (minimum 0.1)
+    /// Seconds to wait between updates (0.1 to 2678400)
     #[arg(
         name = "interval",
         short = 'n',
         long,
-        value_name = "sec",
-        default_value = "2.0"
+        value_name = "secs",
+        default_value = "2.0",
+        env = "WATCH_INTERVAL",
+        allow_hyphen_values = true,
+        value_parser = parse_interval
     )]
     interval: f64,
 
-    /// Beep if command has a non-zero exit
+    /// Beep if the command has a non-zero exit
     #[arg(short = 'b', long)]
     beep: bool,
 
@@ -39,273 +53,341 @@ struct Args {
     #[arg(short = 'C', long = "no-color")]
     no_color: bool,
 
-    /// Highlight differences between successive updates
-    #[arg(short = 'd', long)]
-    differences: bool,
+    /// Highlight changes between updates; an attached value enables permanent mode
+    #[arg(
+        short = 'd',
+        long,
+        value_name = "permanent",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = SUCCESSIVE_DIFFERENCES
+    )]
+    differences: Option<String>,
 
-    /// Highlight all changes since the first iteration (permanent diff)
+    /// Enable permanent differences with the canonical `-d1` form
+    #[arg(short = '1', hide = true, requires = "differences")]
+    differences_short_permanent: bool,
+
+    /// Highlight all changes since the first update
     #[arg(long = "differences-permanent")]
     differences_permanent: bool,
 
-    /// Freeze updates on command error, and exit after a key press
+    /// Exit if the command has a non-zero exit
     #[arg(short = 'e', long)]
     errexit: bool,
 
-    /// Exit when the output of command changes
+    /// Follow output without clearing the screen
+    #[arg(
+        short = 'f',
+        long,
+        conflicts_with_all = [
+            "differences",
+            "differences_permanent",
+            "chgexit",
+            "equexit"
+        ]
+    )]
+    follow: bool,
+
+    /// Exit when the visible output changes
     #[arg(short = 'g', long)]
     chgexit: bool,
 
-    /// Make watch attempt to run command every interval seconds precisely
+    /// Include command running time in the update interval
     #[arg(short = 'p', long)]
     precise: bool,
 
-    /// Exit when output does not change for the given number of cycles
-    #[arg(short = 'q', long, value_name = "cycles")]
+    /// Exit when visible output is unchanged for this many cycles
+    #[arg(
+        short = 'q',
+        long,
+        value_name = "cycles",
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
     equexit: Option<u32>,
 
-    /// Do not run the program on terminal resize
+    /// Do not rerun the command when the terminal is resized
     #[arg(short = 'r', long = "no-rerun")]
     no_rerun: bool,
 
-    /// Turn off the header showing interval, command, and current time
+    /// Directory in which screenshots are saved
+    #[arg(short = 's', long = "shotsdir", value_name = "dir")]
+    shots_dir: Option<PathBuf>,
+
+    /// Turn off the header
     #[arg(short = 't', long = "no-title")]
     no_title: bool,
 
-    /// Turn off line wrapping (long lines will be truncated)
+    /// Truncate long lines instead of wrapping
     #[arg(short = 'w', long = "no-wrap")]
     no_wrap: bool,
 
-    /// Pass command to exec instead of shell
+    /// Execute the command directly instead of through a shell
     #[arg(short = 'x', long)]
     exec: bool,
 
-    /// Execute the command exactly N times, then exit
-    #[arg(long = "count", value_name = "N", conflicts_with_all = ["duration", "until"])]
+    /// Execute the command exactly N times
+    #[arg(
+        long = "count",
+        value_name = "N",
+        conflicts_with_all = ["duration", "until"],
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
     count: Option<u64>,
 
-    /// Execute for the specified duration (e.g., "1h30m", "45s", "2h")
-    #[arg(long = "duration", value_name = "DURATION", conflicts_with_all = ["count", "until"])]
-    duration: Option<String>,
+    /// Execute for a duration such as 1h30m, 45s, or 2h
+    #[arg(
+        long = "duration",
+        value_name = "duration",
+        conflicts_with_all = ["count", "until"],
+        value_parser = parse_duration
+    )]
+    duration: Option<Duration>,
 
-    /// Execute until the specified date/time (ISO 8601 format: YYYY-MM-DDTHH:MM:SS)
-    #[arg(long = "until", value_name = "DATETIME", conflicts_with_all = ["count", "duration"])]
-    until: Option<String>,
+    /// Execute until an ISO 8601 date and time
+    #[arg(
+        long = "until",
+        value_name = "datetime",
+        conflicts_with_all = ["count", "duration"],
+        value_parser = parse_until_datetime
+    )]
+    until: Option<DateTime<Local>>,
 
-    /// The command to run
-    #[arg(name = "command", required = true)]
-    command: String,
+    /// Display version information and exit
+    #[arg(short = 'v', long = "version", action = ArgAction::Version)]
+    version: Option<bool>,
 
-    /// Any number of arguments to pass to the `command`
-    #[arg(name = "args", required = false)]
-    args: Vec<String>,
+    /// Command and arguments to run
+    #[arg(name = "command", required = true, num_args = 1.., allow_hyphen_values = true)]
+    command: Vec<String>,
 }
 
-fn main() -> Result<()> {
+fn main() -> ExitCode {
+    match run() {
+        Ok(code) => ExitCode::from(code.clamp(0, u8::MAX as i32) as u8),
+        Err(error) => {
+            eprintln!("watchr: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> io::Result<i32> {
     let args = Args::parse();
+    let (command, command_args) = args.command.split_first().expect("command is required");
 
-    // Validate interval
-    let interval = if args.interval < 0.1 {
-        0.1
-    } else {
-        args.interval
-    };
+    let execution_limit = args
+        .count
+        .map(ExecutionLimit::Count)
+        .or_else(|| args.duration.map(ExecutionLimit::Duration))
+        .or_else(|| args.until.map(ExecutionLimit::Until));
 
-    // Determine execution limit
-    let execution_limit = if let Some(count) = args.count {
-        Some(ExecutionLimit::Count(count))
-    } else if let Some(ref duration_str) = args.duration {
-        match parse_duration(duration_str) {
-            Ok(duration) => Some(ExecutionLimit::Duration(duration)),
-            Err(e) => {
-                eprintln!("Error parsing duration: {}", e);
-                std::process::exit(1);
-            }
-        }
-    } else if let Some(ref until_str) = args.until {
-        match parse_until_datetime(until_str) {
-            Ok(dt) => Some(ExecutionLimit::Until(dt.with_timezone(&chrono::Local))),
-            Err(e) => {
-                eprintln!(
-                    "Error parsing datetime: {}. Use ISO 8601 format: YYYY-MM-DDTHH:MM:SS",
-                    e
-                );
-                std::process::exit(1);
-            }
-        }
-    } else {
-        None
-    };
+    let differences_permanent = args.differences_permanent
+        || args.differences_short_permanent
+        || args
+            .differences
+            .as_deref()
+            .is_some_and(|value| value != SUCCESSIVE_DIFFERENCES);
 
-    let options = WatchOptions {
-        command: args.command,
-        args: args.args,
-        interval,
+    watch_rs::watch_with_exit_code(WatchOptions {
+        command: command.clone(),
+        args: command_args.to_vec(),
+        interval: args.interval,
         beep: args.beep,
         color: args.color && !args.no_color,
         no_color: args.no_color,
-        differences: args.differences || args.differences_permanent,
-        differences_permanent: args.differences_permanent,
+        differences: args.differences.is_some() || differences_permanent,
+        differences_permanent,
         errexit: args.errexit,
+        follow: args.follow,
         chgexit: args.chgexit,
         precise: args.precise,
         equexit: args.equexit,
         no_rerun: args.no_rerun,
+        shots_dir: args.shots_dir,
         no_title: args.no_title,
         no_wrap: args.no_wrap,
         exec: args.exec,
         execution_limit,
-    };
-
-    watch_rs::watch(options)
+    })
 }
 
-fn parse_until_datetime(
-    input: &str,
-) -> std::result::Result<chrono::DateTime<chrono::FixedOffset>, String> {
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(input) {
-        return Ok(dt);
+fn parse_interval(input: &str) -> Result<f64, String> {
+    let normalized = input.trim().replace(',', ".");
+    let interval = normalized
+        .parse::<f64>()
+        .map_err(|_| format!("invalid interval '{input}'"))?;
+
+    if !interval.is_finite() {
+        return Err("interval must be a finite number".to_string());
+    }
+
+    Ok(interval.clamp(MIN_INTERVAL, MAX_INTERVAL))
+}
+
+fn parse_until_datetime(input: &str) -> Result<DateTime<Local>, String> {
+    if let Ok(datetime) = DateTime::parse_from_rfc3339(input) {
+        return Ok(datetime.with_timezone(&Local));
     }
 
     parse_local_datetime(input, "%Y-%m-%dT%H:%M:%S")
         .or_else(|_| parse_local_datetime(input, "%Y-%m-%d %H:%M:%S"))
+        .map_err(|error| {
+            format!(
+                "{error}; use ISO 8601 format, for example 2030-12-31T23:59:59 or an RFC 3339 offset"
+            )
+        })
 }
 
-fn parse_local_datetime(
-    input: &str,
-    format: &str,
-) -> std::result::Result<chrono::DateTime<chrono::FixedOffset>, String> {
-    let ndt =
-        chrono::NaiveDateTime::parse_from_str(input, format).map_err(|err| err.to_string())?;
-    chrono::Local
-        .from_local_datetime(&ndt)
+fn parse_local_datetime(input: &str, format: &str) -> Result<DateTime<Local>, String> {
+    let datetime =
+        NaiveDateTime::parse_from_str(input, format).map_err(|error| error.to_string())?;
+    Local
+        .from_local_datetime(&datetime)
         .single()
-        .map(|dt| dt.fixed_offset())
         .ok_or_else(|| "datetime is ambiguous or does not exist in the local timezone".to_string())
 }
 
-/// Parse a duration string like "1h30m", "45s", "2h", "30m5s"
-fn parse_duration(s: &str) -> std::result::Result<std::time::Duration, String> {
-    let s = s.trim().to_lowercase();
-    if s.is_empty() {
-        return Err("Empty duration string".to_string());
+fn parse_duration(input: &str) -> Result<Duration, String> {
+    let input = input.trim().to_ascii_lowercase();
+    if input.is_empty() {
+        return Err("duration cannot be empty".to_string());
     }
 
-    let mut total_secs: u64 = 0;
-    let mut current_num = String::new();
+    let mut total_seconds = 0_u64;
+    let mut current_number = String::new();
 
-    for c in s.chars() {
-        if c.is_ascii_digit() {
-            current_num.push(c);
-        } else {
-            if current_num.is_empty() {
-                return Err(format!("Invalid duration format: unexpected '{}'", c));
-            }
-            let num: u64 = current_num.parse().map_err(|_| "Invalid number")?;
-            current_num.clear();
-
-            let unit_secs = match c {
-                'h' => 3600,
-                'm' => 60,
-                's' => 1,
-                'd' => 86400,
-                _ => return Err(format!("Unknown duration unit: '{}'", c)),
-            };
-            let secs = num
-                .checked_mul(unit_secs)
-                .ok_or_else(|| "Duration is too large".to_string())?;
-            total_secs = total_secs
-                .checked_add(secs)
-                .ok_or_else(|| "Duration is too large".to_string())?;
+    for character in input.chars() {
+        if character.is_ascii_digit() {
+            current_number.push(character);
+            continue;
         }
+
+        if current_number.is_empty() {
+            return Err(format!("unexpected '{character}' in duration"));
+        }
+
+        let value = current_number
+            .parse::<u64>()
+            .map_err(|_| "invalid duration number".to_string())?;
+        current_number.clear();
+
+        let multiplier = match character {
+            's' => 1,
+            'm' => 60,
+            'h' => 60 * 60,
+            'd' => 60 * 60 * 24,
+            _ => return Err(format!("unknown duration unit '{character}'")),
+        };
+        let seconds = value
+            .checked_mul(multiplier)
+            .ok_or_else(|| "duration is too large".to_string())?;
+        total_seconds = total_seconds
+            .checked_add(seconds)
+            .ok_or_else(|| "duration is too large".to_string())?;
     }
 
-    // Handle case where string ends with a number (assume seconds)
-    if !current_num.is_empty() {
-        let num: u64 = current_num.parse().map_err(|_| "Invalid number")?;
-        total_secs = total_secs
-            .checked_add(num)
-            .ok_or_else(|| "Duration is too large".to_string())?;
+    if !current_number.is_empty() {
+        let seconds = current_number
+            .parse::<u64>()
+            .map_err(|_| "invalid duration number".to_string())?;
+        total_seconds = total_seconds
+            .checked_add(seconds)
+            .ok_or_else(|| "duration is too large".to_string())?;
     }
 
-    if total_secs == 0 {
-        return Err("Duration must be greater than 0".to_string());
+    if total_seconds == 0 {
+        return Err("duration must be greater than zero".to_string());
     }
 
-    Ok(std::time::Duration::from_secs(total_secs))
+    Ok(Duration::from_secs(total_seconds))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::error::ErrorKind;
 
     #[test]
-    fn test_parse_duration_seconds() {
-        assert_eq!(
-            parse_duration("30s").unwrap(),
-            std::time::Duration::from_secs(30)
-        );
-        assert_eq!(
-            parse_duration("45").unwrap(),
-            std::time::Duration::from_secs(45)
-        );
+    fn interval_accepts_both_decimal_separators_and_clamps_bounds() {
+        assert_eq!(parse_interval("1.5").unwrap(), 1.5);
+        assert_eq!(parse_interval("1,5").unwrap(), 1.5);
+        assert_eq!(parse_interval("0").unwrap(), MIN_INTERVAL);
+        assert_eq!(parse_interval("999999999").unwrap(), MAX_INTERVAL);
     }
 
     #[test]
-    fn test_parse_duration_minutes() {
-        assert_eq!(
-            parse_duration("5m").unwrap(),
-            std::time::Duration::from_secs(300)
-        );
+    fn interval_rejects_non_finite_values() {
+        assert!(parse_interval("NaN").is_err());
+        assert!(parse_interval("inf").is_err());
     }
 
     #[test]
-    fn test_parse_duration_hours() {
-        assert_eq!(
-            parse_duration("2h").unwrap(),
-            std::time::Duration::from_secs(7200)
-        );
-    }
-
-    #[test]
-    fn test_parse_duration_combined() {
-        assert_eq!(
-            parse_duration("1h30m").unwrap(),
-            std::time::Duration::from_secs(5400)
-        );
+    fn duration_parses_single_and_combined_units() {
+        assert_eq!(parse_duration("45").unwrap(), Duration::from_secs(45));
+        assert_eq!(parse_duration("5m").unwrap(), Duration::from_secs(300));
         assert_eq!(
             parse_duration("1h30m45s").unwrap(),
-            std::time::Duration::from_secs(5445)
+            Duration::from_secs(5_445)
         );
+        assert_eq!(parse_duration("1D").unwrap(), Duration::from_secs(86_400));
     }
 
     #[test]
-    fn test_parse_duration_days() {
-        assert_eq!(
-            parse_duration("1d").unwrap(),
-            std::time::Duration::from_secs(86400)
-        );
-    }
-
-    #[test]
-    fn test_parse_duration_invalid() {
-        assert!(parse_duration("").is_err());
-        assert!(parse_duration("abc").is_err());
-        assert!(parse_duration("0").is_err());
-    }
-
-    #[test]
-    fn test_parse_duration_overflow() {
+    fn duration_rejects_invalid_and_overflowing_values() {
+        for invalid in ["", "abc", "0", "1.5s", "s1"] {
+            assert!(parse_duration(invalid).is_err(), "{invalid} was accepted");
+        }
         assert!(parse_duration(&format!("{}d", u64::MAX)).is_err());
     }
 
     #[test]
-    fn test_parse_until_datetime_rfc3339() {
+    fn until_accepts_rfc3339_and_local_formats() {
         let parsed = parse_until_datetime("2026-05-09T08:44:07Z").unwrap();
-        assert_eq!(parsed.to_rfc3339(), "2026-05-09T08:44:07+00:00");
+        assert_eq!(
+            parsed.with_timezone(&chrono::Utc).to_rfc3339(),
+            "2026-05-09T08:44:07+00:00"
+        );
+        assert!(parse_until_datetime("2030-12-31 23:59:59").is_ok());
+        assert!(parse_until_datetime("not-a-date").is_err());
     }
 
     #[test]
-    fn test_parse_until_datetime_invalid() {
-        assert!(parse_until_datetime("not-a-date").is_err());
+    fn canonical_difference_forms_are_accepted() {
+        let successive = Args::try_parse_from(["watchr", "-d", "echo"]).unwrap();
+        assert_eq!(
+            successive.differences.as_deref(),
+            Some(SUCCESSIVE_DIFFERENCES)
+        );
+
+        let short_permanent = Args::try_parse_from(["watchr", "-d1", "echo"]).unwrap();
+        assert_eq!(
+            short_permanent.differences.as_deref(),
+            Some(SUCCESSIVE_DIFFERENCES)
+        );
+        assert!(short_permanent.differences_short_permanent);
+
+        let long_permanent =
+            Args::try_parse_from(["watchr", "--differences=permanent", "echo"]).unwrap();
+        assert_eq!(long_permanent.differences.as_deref(), Some("permanent"));
+    }
+
+    #[test]
+    fn command_options_are_trailing_arguments() {
+        let args = Args::try_parse_from(["watchr", "--exec", "echo", "-n", "hello"]).unwrap();
+        assert_eq!(args.interval, 2.0);
+        assert_eq!(args.command, ["echo", "-n", "hello"]);
+    }
+
+    #[test]
+    fn follow_rejects_screen_tracking_modes() {
+        let error = Args::try_parse_from(["watchr", "--follow", "--chgexit", "echo"])
+            .expect_err("conflicting options should fail");
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn zero_count_is_rejected() {
+        assert!(Args::try_parse_from(["watchr", "--count", "0", "echo"]).is_err());
     }
 }
